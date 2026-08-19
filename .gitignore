@@ -13,6 +13,10 @@ __pycache__/
 # Exclude Data Folder (videos, frames, scenes, transcripts, metadata)
 data/
 
+# Cookie files
+cookies.txt
+*cookies*.txt
+
 # OS & Editor Files
 .DS_Store
 Thumbs.db

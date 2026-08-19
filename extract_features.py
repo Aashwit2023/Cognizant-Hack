@@ -31,22 +31,30 @@ class YouTubeFeatureExtractor:
         video_path = os.path.join(self.dirs["videos"], f"{video_id}.mp4")
         metadata_path = os.path.join(self.dirs["metadata"], f"{video_id}.json")
 
-        # --- YDL OPTS TO BYPASS 403 FORBIDDEN ERROR ---
+        # --- YDL OPTS TO BYPASS BOT DETECTION & 403 FORBIDDEN ERROR ---
         ydl_opts = {
-            'format': 'best[ext=mp4]',
+            'format': 'best[ext=mp4]/best',
             'outtmpl': video_path,
-            'quiet': True,
+            'quiet': False,
             'no_warnings': True,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
                 'Accept-Language': 'en-US,en;q=0.9',
             },
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'web'],
+                    'player_client': ['ios', 'android', 'tv_embedded', 'mweb'],
                 }
             }
         }
+
+        # Auto-detect cookies.txt if available
+        cookie_paths = ["cookies.txt", os.path.join(self.output_dir, "cookies.txt")]
+        for cp in cookie_paths:
+            if os.path.exists(cp):
+                print(f"🍪 Using cookies from {cp}")
+                ydl_opts['cookiefile'] = cp
+                break
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Extract info
