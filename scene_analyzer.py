@@ -2,15 +2,16 @@ import os
 import sys
 import json
 import time
+import re
 import cv2
 import numpy as np
 from PIL import Image
 import torch
 
-if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
-if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8')
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 class SceneAnalyzer:
     # Class-level model caches to ensure each model is loaded ONLY ONCE across the entire application runtime
@@ -53,8 +54,7 @@ class SceneAnalyzer:
             SceneAnalyzer._cached_caption_processor = BlipProcessor.from_pretrained(model_id)
             SceneAnalyzer._cached_caption_model = BlipForConditionalGeneration.from_pretrained(
                 model_id,
-                torch_dtype=dtype,
-                use_safetensors=True
+                torch_dtype=dtype
             ).to(self.device)
             SceneAnalyzer._cached_caption_model.eval()
             
@@ -65,15 +65,11 @@ class SceneAnalyzer:
     def _load_emotion_classifier(self):
         if SceneAnalyzer._cached_emotion_classifier is None:
             t0 = time.time()
-            from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
+            from transformers import pipeline
             device_idx = 0 if self.device == "cuda" else -1
-            model_id = "j-hartmann/emotion-english-distilroberta-base"
-            model = AutoModelForSequenceClassification.from_pretrained(model_id, use_safetensors=True)
-            tokenizer = AutoTokenizer.from_pretrained(model_id)
             SceneAnalyzer._cached_emotion_classifier = pipeline(
                 "text-classification",
-                model=model,
-                tokenizer=tokenizer,
+                model="j-hartmann/emotion-english-distilroberta-base",
                 device=device_idx,
                 top_k=1
             )
@@ -86,7 +82,7 @@ class SceneAnalyzer:
             t0 = time.time()
             from sentence_transformers import SentenceTransformer
             SceneAnalyzer._cached_embedding_model = SentenceTransformer(
-                "all-MiniLM-L6-v2",
+                "paraphrase-multilingual-MiniLM-L12-v2",
                 device=self.device
             )
             if not SceneAnalyzer._model_load_logged["embedding"]:
@@ -108,9 +104,17 @@ class SceneAnalyzer:
         video_keyframes_dir = os.path.join(self.scenes_dir, video_id)
         os.makedirs(video_keyframes_dir, exist_ok=True)
 
+        if not os.path.exists(video_path):
+            print(f"❌ Video file not found at: {video_path}")
+            return [], 0.0
+
         cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        min_scene_frames = int(fps * min_scene_sec)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or np.isnan(fps) or fps <= 0:
+            fps = 30.0
+        min_scene_frames = max(int(fps * min_scene_sec), 1)
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        total_duration = frame_count / fps if fps > 0 and frame_count > 0 else 0
         cap.release()
 
         try:
@@ -120,45 +124,43 @@ class SceneAnalyzer:
             
             if detected_scenes and len(detected_scenes) > 1:
                 for idx, (start_time, end_time) in enumerate(detected_scenes):
-                    s_sec = float(start_time.seconds) if hasattr(start_time, "seconds") else start_time.get_seconds()
-                    e_sec = float(end_time.seconds) if hasattr(end_time, "seconds") else end_time.get_seconds()
                     scene_list.append({
                         "scene_id": idx + 1,
-                        "start_sec": round(s_sec, 2),
-                        "end_sec": round(e_sec, 2),
-                        "duration_sec": round(e_sec - s_sec, 2)
+                        "start_sec": round(start_time.get_seconds(), 2),
+                        "end_sec": round(end_time.get_seconds(), 2),
+                        "duration_sec": round(end_time.get_seconds() - start_time.get_seconds(), 2)
                     })
                 print(f"🎬 PySceneDetect identified {len(scene_list)} distinct scenes (>= {min_scene_sec}s each).")
         except Exception as e:
             print(f"⚠️ PySceneDetect fallback triggered ({e}).")
 
-        # Fallback: Fixed-interval segmentation if no cuts found
+        # Fallback: Fixed-interval segmentation if no cuts or only 1 cut found
         if len(scene_list) <= 1:
-            cap = cv2.VideoCapture(video_path)
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            total_duration = frame_count / fps if fps > 0 else 0
-            cap.release()
-            
             scene_list = []
-            curr_start = 0.0
-            scene_idx = 1
-            while curr_start < total_duration:
-                curr_end = min(curr_start + fallback_interval_sec, total_duration)
-                scene_list.append({
-                    "scene_id": scene_idx,
-                    "start_sec": round(curr_start, 2),
-                    "end_sec": round(curr_end, 2),
-                    "duration_sec": round(curr_end - curr_start, 2)
-                })
-                curr_start = curr_end
-                scene_idx += 1
-            print(f"🎬 Created {len(scene_list)} interval-based scenes ({fallback_interval_sec}s intervals).")
+            if total_duration > 0:
+                curr_start = 0.0
+                scene_idx = 1
+                while curr_start < total_duration:
+                    curr_end = min(curr_start + fallback_interval_sec, total_duration)
+                    scene_list.append({
+                        "scene_id": scene_idx,
+                        "start_sec": round(curr_start, 2),
+                        "end_sec": round(curr_end, 2),
+                        "duration_sec": round(curr_end - curr_start, 2)
+                    })
+                    curr_start = curr_end
+                    scene_idx += 1
+                print(f"🎬 Created {len(scene_list)} interval-based scenes ({fallback_interval_sec}s intervals).")
+            else:
+                scene_list = [{
+                    "scene_id": 1,
+                    "start_sec": 0.0,
+                    "end_sec": round(fallback_interval_sec, 2),
+                    "duration_sec": round(fallback_interval_sec, 2)
+                }]
 
         # Extract exactly 1 representative midpoint keyframe per scene
         cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        
         for scene in scene_list:
             midpoint_sec = (scene["start_sec"] + scene["end_sec"]) / 2.0
             frame_idx = int(midpoint_sec * fps)
@@ -169,7 +171,7 @@ class SceneAnalyzer:
             frame_filename = f"scene_{scene['scene_id']:03d}_{round(midpoint_sec, 1)}s.jpg"
             frame_path = os.path.join(video_keyframes_dir, frame_filename)
             
-            if ret:
+            if ret and frame is not None and frame.size > 0:
                 cv2.imwrite(frame_path, frame)
                 scene["keyframe_path"] = frame_path
                 scene["keyframe_time_sec"] = round(midpoint_sec, 2)
@@ -191,6 +193,9 @@ class SceneAnalyzer:
         """
         t0 = time.time()
         print(f"\n[Step 2/5] Generating visual captions for {len(scenes)} scenes (batch_size={batch_size})...")
+        if not scenes:
+            return scenes, 0.0
+            
         self._load_caption_model()
         
         processor = SceneAnalyzer._cached_caption_processor
@@ -206,9 +211,9 @@ class SceneAnalyzer:
                 fpath = scene.get("keyframe_path")
                 if fpath and os.path.exists(fpath):
                     try:
-                        img = Image.open(fpath).convert('RGB')
-                        # Downscale/resize to 384x384 for fast CPU processing
-                        img = img.resize((384, 384), resampling)
+                        with Image.open(fpath) as img_raw:
+                            # Downscale/resize to 384x384 for fast CPU processing
+                            img = img_raw.convert('RGB').resize((384, 384), resampling)
                         batch_images.append(img)
                         valid_indices.append(local_idx)
                     except Exception:
@@ -250,19 +255,24 @@ class SceneAnalyzer:
         print(f"\n[Step 3/5] Matching transcript dialogue to scenes...")
         
         transcript_data = []
-        if os.path.exists(transcript_path):
+        if transcript_path and os.path.exists(transcript_path):
             try:
                 with open(transcript_path, 'r', encoding='utf-8') as f:
                     transcript_data = json.load(f)
             except Exception as e:
                 print(f"⚠️ Failed to read transcript: {e}")
 
+        if not isinstance(transcript_data, list):
+            transcript_data = []
+
         for scene in scenes:
-            scene_start = scene["start_sec"]
-            scene_end = scene["end_sec"]
+            scene_start = scene.get("start_sec", 0.0)
+            scene_end = scene.get("end_sec", 0.0)
             
             matched = []
             for item in transcript_data:
+                if not isinstance(item, dict):
+                    continue
                 t_start = item.get("start", 0.0)
                 t_duration = item.get("duration", 0.0)
                 t_end = t_start + t_duration
@@ -287,6 +297,9 @@ class SceneAnalyzer:
         """
         t0 = time.time()
         print(f"\n[Step 4/5] Classifying emotional tone for {len(scenes)} scenes in batches...")
+        if not scenes:
+            return scenes, 0.0
+
         self._load_emotion_classifier()
         classifier = SceneAnalyzer._cached_emotion_classifier
 
@@ -330,6 +343,24 @@ class SceneAnalyzer:
         """
         t0 = time.time()
         print(f"\n[Step 5/5] Building profiles & generating {len(scenes)} embeddings...")
+        
+        output_json_path = os.path.join(self.scenes_dir, f"{video_id}_scenes.json")
+        output_npy_path = os.path.join(self.scenes_dir, f"{video_id}_embeddings.npy")
+
+        if not scenes:
+            output_data = {
+                "video_id": video_id,
+                "metadata": metadata or {},
+                "total_scenes": 0,
+                "embedding_model": "paraphrase-multilingual-MiniLM-L12-v2",
+                "embedding_dim": 384,
+                "scenes": []
+            }
+            with open(output_json_path, 'w', encoding='utf-8') as f:
+                json.dump(output_data, f, indent=4, ensure_ascii=False)
+            np.save(output_npy_path, np.empty((0, 384), dtype=np.float32))
+            return output_data, 0.0
+
         self._load_embedding_model()
         model = SceneAnalyzer._cached_embedding_model
 
@@ -355,14 +386,15 @@ class SceneAnalyzer:
         for idx, scene in enumerate(scenes):
             scene["embedding"] = embeddings[idx].tolist()
 
+        dim = int(embeddings.shape[1]) if len(embeddings.shape) > 1 and embeddings.shape[0] > 0 else 384
+
         # Save Scene Data JSON
-        output_json_path = os.path.join(self.scenes_dir, f"{video_id}_scenes.json")
         output_data = {
             "video_id": video_id,
             "metadata": metadata or {},
             "total_scenes": len(scenes),
-            "embedding_model": "all-MiniLM-L6-v2",
-            "embedding_dim": int(embeddings.shape[1]) if len(embeddings) > 0 else 384,
+            "embedding_model": "paraphrase-multilingual-MiniLM-L12-v2",
+            "embedding_dim": dim,
             "scenes": scenes
         }
         
@@ -370,7 +402,6 @@ class SceneAnalyzer:
             json.dump(output_data, f, indent=4, ensure_ascii=False)
             
         # Save NumPy Embeddings (.npy)
-        output_npy_path = os.path.join(self.scenes_dir, f"{video_id}_embeddings.npy")
         np.save(output_npy_path, embeddings)
 
         elapsed = time.time() - t0
@@ -415,7 +446,7 @@ class SceneAnalyzer:
         # Step 5: Profile Fusion & Sentence Embeddings
         result, t_step5 = self.build_scene_profiles_and_embeddings(scenes, video_id, metadata)
         
-        total_time = time.time() - total_start
+        total_time = max(time.time() - total_start, 0.001)
 
         # Print Timing Breakdown
         print("\n" + "="*60)
@@ -433,16 +464,26 @@ class SceneAnalyzer:
         return result
 
 
+def clean_video_id(input_str):
+    """Extracts a clean video ID from either a URL or raw ID."""
+    input_str = input_str.strip()
+    if re.fullmatch(r"[0-9A-Za-z_-]{11}", input_str):
+        return input_str
+    match = re.search(r"(?:v=|\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})", input_str)
+    return match.group(1) if match else input_str
+
+
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) > 1:
-        vid_id = sys.argv[1]
+        raw_input = sys.argv[1]
     else:
-        vid_id = input("Enter Video ID to analyze (e.g., xLTCivIB4kU): ").strip()
+        raw_input = input("Enter Video ID or YouTube URL to analyze (e.g., xLTCivIB4kU): ").strip()
         
+    vid_id = clean_video_id(raw_input)
     vid_path = os.path.join("data", "videos", f"{vid_id}.mp4")
     if not os.path.exists(vid_path):
         print(f"❌ Video not found at {vid_path}")
+        print("Tip: Run `python extract_features.py` first to download the video.")
     else:
         analyzer = SceneAnalyzer()
         analyzer.analyze_video(vid_path, vid_id)

@@ -1,10 +1,15 @@
 import os
+import sys
 import cv2
 import json
 import re
 import yt_dlp
-# EXACT IMPORT NEEDED FOR THE TRANSCRIPT API
 from youtube_transcript_api import YouTubeTranscriptApi
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 class YouTubeFeatureExtractor:
     def __init__(self, output_dir="data"):
@@ -20,14 +25,23 @@ class YouTubeFeatureExtractor:
             os.makedirs(path, exist_ok=True)
 
     def extract_video_id(self, url):
-        """Extracts the video ID from a YouTube URL."""
-        match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
+        """Extracts the video ID from a YouTube URL or direct ID."""
+        url = url.strip()
+        # Direct 11-char ID
+        if re.fullmatch(r"[0-9A-Za-z_-]{11}", url):
+            return url
+        # Standard URL patterns (watch?v=, youtu.be/, shorts/, embed/)
+        match = re.search(r"(?:v=|\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})", url)
         return match.group(1) if match else None
 
     def download_video_and_metadata(self, url, video_id):
         """Downloads the video file and saves metadata as JSON."""
         print(f"[1/3] Fetching Video and Metadata for {video_id}...")
         
+        # If url was just the video ID, format as full YouTube URL for yt_dlp
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = f"https://www.youtube.com/watch?v={video_id}"
+
         video_path = os.path.join(self.dirs["videos"], f"{video_id}.mp4")
         metadata_path = os.path.join(self.dirs["metadata"], f"{video_id}.json")
 
@@ -57,20 +71,18 @@ class YouTubeFeatureExtractor:
                 break
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extract info
             info = ydl.extract_info(url, download=True)
             
-            # Save relevant metadata
             metadata = {
-                "id": info.get("id"),
-                "title": info.get("title"),
-                "description": info.get("description"),
+                "id": info.get("id", video_id),
+                "title": info.get("title", ""),
+                "description": info.get("description", ""),
                 "tags": info.get("tags", []),
                 "categories": info.get("categories", []),
-                "view_count": info.get("view_count"),
-                "like_count": info.get("like_count"),
-                "duration": info.get("duration"),
-                "channel": info.get("uploader")
+                "view_count": info.get("view_count", 0),
+                "like_count": info.get("like_count", 0),
+                "duration": info.get("duration", 0),
+                "channel": info.get("uploader", "")
             }
             
             with open(metadata_path, 'w', encoding='utf-8') as f:
@@ -80,46 +92,46 @@ class YouTubeFeatureExtractor:
         print(f"✅ Metadata saved to {metadata_path}")
         return video_path
 
-    # --- UPDATED TRANSCRIPT FUNCTION ---
     def extract_transcript(self, video_id):
         """Fetches the transcript with timestamps safely."""
         print(f"[2/3] Fetching Transcript for {video_id}...")
         transcript_path = os.path.join(self.dirs["transcripts"], f"{video_id}.json")
         
         try:
-            # Support both youtube-transcript-api v1.x (instance) and legacy (static)
+            # Support youtube-transcript-api v1.x and legacy versions
+            transcript_data = []
             try:
                 ytt = YouTubeTranscriptApi()
-                transcript_list = ytt.list(video_id)
-            except (AttributeError, TypeError):
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            
-            # Try getting English or Hindi first
-            try:
-                transcript_obj = transcript_list.find_transcript(['en', 'hi'])
-            except Exception:
-                # Fallback: take the first available transcript
-                transcript_obj = next(iter(transcript_list))
-                
-            fetched = transcript_obj.fetch()
-            
-            # Helper to convert transcript objects into serializable JSON format
-            def serialize(obj):
-                if hasattr(obj, 'to_raw_data'):
-                    return obj.to_raw_data()
-                if hasattr(obj, 'to_dict'):
-                    return obj.to_dict()
-                if isinstance(obj, list):
-                    return [serialize(item) for item in obj]
-                if isinstance(obj, dict):
-                    return {k: serialize(v) for k, v in obj.items()}
-                if hasattr(obj, '__dict__'):
-                    return {k: serialize(v) for k, v in obj.__dict__.items()}
-                return obj
+                try:
+                    transcript_obj = ytt.fetch(video_id, languages=['en', 'hi'])
+                except Exception:
+                    # Fallback: list transcripts and pick the first available
+                    transcript_list = ytt.list(video_id)
+                    try:
+                        transcript_obj = transcript_list.find_transcript(['en', 'hi'])
+                    except Exception:
+                        transcript_obj = next(iter(transcript_list))
+                    transcript_obj = transcript_obj.fetch()
 
-            transcript_data = serialize(fetched)
-                    
-            # Save to JSON
+                if hasattr(transcript_obj, 'to_raw_data'):
+                    transcript_data = transcript_obj.to_raw_data()
+                elif hasattr(transcript_obj, 'to_dict'):
+                    transcript_data = transcript_obj.to_dict()
+                else:
+                    transcript_data = [
+                        {"text": getattr(item, 'text', str(item)), "start": getattr(item, 'start', 0.0), "duration": getattr(item, 'duration', 0.0)}
+                        if hasattr(item, 'text') else item
+                        for item in transcript_obj
+                    ]
+            except Exception:
+                # Legacy API fallback
+                try:
+                    transcript_data = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'hi'])
+                except Exception:
+                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                    transcript_obj = transcript_list.find_transcript(['en', 'hi'])
+                    transcript_data = transcript_obj.fetch()
+
             with open(transcript_path, 'w', encoding='utf-8') as f:
                 json.dump(transcript_data, f, indent=4, ensure_ascii=False)
             print(f"✅ Transcript saved to {transcript_path}")
@@ -127,6 +139,9 @@ class YouTubeFeatureExtractor:
         except Exception as e:
             print(f"❌ Could not fetch transcript: {e}")
             print("Note: The video might not have any closed captions available.")
+            # Write empty list to avoid missing file errors in downstream pipeline
+            with open(transcript_path, 'w', encoding='utf-8') as f:
+                json.dump([], f, indent=4, ensure_ascii=False)
 
     def extract_frames(self, video_path, video_id, interval_seconds=5):
         """Extracts 1 frame every X seconds to save storage and processing time."""
@@ -136,15 +151,15 @@ class YouTubeFeatureExtractor:
         os.makedirs(frame_dir, exist_ok=True)
         
         cap = cv2.VideoCapture(video_path)
-        fps = round(cap.get(cv2.CAP_PROP_FPS))
+        fps = round(cap.get(cv2.CAP_PROP_FPS) or 0)
         
         # Prevent division by zero if video fails to load
-        if fps == 0:
+        if fps <= 0:
             print("❌ Could not read video frames.")
+            cap.release()
             return
             
-        frame_interval = fps * interval_seconds
-        
+        frame_interval = max(int(fps * interval_seconds), 1)
         count = 0
         saved_count = 0
         
@@ -154,7 +169,6 @@ class YouTubeFeatureExtractor:
                 break
                 
             if count % frame_interval == 0:
-                # Time in seconds
                 timestamp = count // fps 
                 frame_filename = os.path.join(frame_dir, f"frame_{timestamp}s.jpg")
                 cv2.imwrite(frame_filename, frame)
@@ -169,7 +183,7 @@ class YouTubeFeatureExtractor:
         """Main pipeline function."""
         video_id = self.extract_video_id(url)
         if not video_id:
-            print("❌ Invalid YouTube URL")
+            print("❌ Invalid YouTube URL or Video ID")
             return
 
         print(f"Starting extraction for Video ID: {video_id}\n" + "-"*40)
@@ -201,7 +215,10 @@ class YouTubeFeatureExtractor:
 
 # --- Run the Script ---
 if __name__ == "__main__":
-    youtube_url = input("Please enter the YouTube Video URL: ")
+    if len(sys.argv) > 1:
+        youtube_url = sys.argv[1]
+    else:
+        youtube_url = input("Please enter the YouTube Video URL or Video ID: ")
     
     extractor = YouTubeFeatureExtractor()
     extractor.process_url(youtube_url)

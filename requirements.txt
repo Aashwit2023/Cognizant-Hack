@@ -1,8 +1,10 @@
 yt-dlp
 opencv-python
 youtube-transcript-api
-scenedetect[opencv]
+scenedetect
 torch
 transformers
-Pillow
 sentence-transformers
+Pillow
+pandas
+numpy
