@@ -71,7 +71,7 @@ pip install -r requirements.txt
 ### 1. Run End-to-End Extraction & Scene Analysis
 ```bash
 python extract_features.py
-# Enter any YouTube URL when prompted
+# Enter any YouTube URL when prompted -> also used VPN if not working
 ```
 
 ### 2. Run Scene Analysis on an Already Downloaded Video

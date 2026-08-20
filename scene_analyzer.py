@@ -1,10 +1,16 @@
 import os
+import sys
 import json
 import time
 import cv2
 import numpy as np
 from PIL import Image
 import torch
+
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 class SceneAnalyzer:
     # Class-level model caches to ensure each model is loaded ONLY ONCE across the entire application runtime
@@ -47,7 +53,8 @@ class SceneAnalyzer:
             SceneAnalyzer._cached_caption_processor = BlipProcessor.from_pretrained(model_id)
             SceneAnalyzer._cached_caption_model = BlipForConditionalGeneration.from_pretrained(
                 model_id,
-                torch_dtype=dtype
+                torch_dtype=dtype,
+                use_safetensors=True
             ).to(self.device)
             SceneAnalyzer._cached_caption_model.eval()
             
@@ -58,11 +65,15 @@ class SceneAnalyzer:
     def _load_emotion_classifier(self):
         if SceneAnalyzer._cached_emotion_classifier is None:
             t0 = time.time()
-            from transformers import pipeline
+            from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
             device_idx = 0 if self.device == "cuda" else -1
+            model_id = "j-hartmann/emotion-english-distilroberta-base"
+            model = AutoModelForSequenceClassification.from_pretrained(model_id, use_safetensors=True)
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
             SceneAnalyzer._cached_emotion_classifier = pipeline(
                 "text-classification",
-                model="j-hartmann/emotion-english-distilroberta-base",
+                model=model,
+                tokenizer=tokenizer,
                 device=device_idx,
                 top_k=1
             )
@@ -109,11 +120,13 @@ class SceneAnalyzer:
             
             if detected_scenes and len(detected_scenes) > 1:
                 for idx, (start_time, end_time) in enumerate(detected_scenes):
+                    s_sec = float(start_time.seconds) if hasattr(start_time, "seconds") else start_time.get_seconds()
+                    e_sec = float(end_time.seconds) if hasattr(end_time, "seconds") else end_time.get_seconds()
                     scene_list.append({
                         "scene_id": idx + 1,
-                        "start_sec": round(start_time.get_seconds(), 2),
-                        "end_sec": round(end_time.get_seconds(), 2),
-                        "duration_sec": round(end_time.get_seconds() - start_time.get_seconds(), 2)
+                        "start_sec": round(s_sec, 2),
+                        "end_sec": round(e_sec, 2),
+                        "duration_sec": round(e_sec - s_sec, 2)
                     })
                 print(f"🎬 PySceneDetect identified {len(scene_list)} distinct scenes (>= {min_scene_sec}s each).")
         except Exception as e:
