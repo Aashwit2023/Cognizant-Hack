@@ -1,0 +1,9 @@
+yt-dlp
+opencv-python
+youtube-transcript-api
+torch
+transformers
+sentence-transformers
+Pillow
+pandas
+numpy
