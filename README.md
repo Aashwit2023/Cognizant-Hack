@@ -82,13 +82,8 @@ python extract_features.py
 # Enter any YouTube URL or Video ID when prompted (or pass as argument: python extract_features.py <URL>)
 ```
 
-### 2. Run Scene Analysis on an Already Downloaded Video
-```bash
-python scene_analyzer.py <video_id>
-# Example: python scene_analyzer.py xLTCivIB4kU
-```
 
-### 3. Run Ad Recommendation Engine
+### 2. Run Ad Recommendation Engine
 ```bash
 python recommend_ads_advanced.py <video_id>
 # Example: python recommend_ads_advanced.py xLTCivIB4kU
