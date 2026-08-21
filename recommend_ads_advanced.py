@@ -420,6 +420,16 @@ class AdvancedAdRecommender:
             self.ad_vectors[ad_name] = torch.tensor(vec, device=self.device)
             
         print(f"✅ Loaded {len(self.ad_campaigns)} Scene-Aware Ad Campaign Profiles!")
+        
+        # Optional Pinecone Vector Database Integration
+        try:
+            from pinecone_db import PineconeManager
+            self.pinecone_mgr = PineconeManager()
+            if self.pinecone_mgr.is_available():
+                print("🌲 Pinecone Vector DB: Connected (Namespace: 'ad-inventory')")
+        except Exception:
+            self.pinecone_mgr = None
+
         print("=" * 60)
 
     def recommend_for_video(self, video_id, threshold=0.38, top_k_per_campaign=1):

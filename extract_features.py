@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import cv2
 import json
 import re
@@ -18,7 +19,8 @@ class YouTubeFeatureExtractor:
             "videos": os.path.join(output_dir, "videos"),
             "frames": os.path.join(output_dir, "frames"),
             "transcripts": os.path.join(output_dir, "transcripts"),
-            "metadata": os.path.join(output_dir, "metadata")
+            "metadata": os.path.join(output_dir, "metadata"),
+            "scenes": os.path.join(output_dir, "scenes"),
         }
         # Create directories if they don't exist
         for path in self.dirs.values():
@@ -33,6 +35,77 @@ class YouTubeFeatureExtractor:
         # Standard URL patterns (watch?v=, youtu.be/, shorts/, embed/)
         match = re.search(r"(?:v=|\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})", url)
         return match.group(1) if match else None
+
+    def is_already_processed(self, video_id):
+        """
+        Checks if scene analysis has already been completed for this video.
+        Returns True if both the scenes JSON and embeddings .npy file exist and are valid.
+        """
+        json_path = os.path.join(self.dirs["scenes"], f"{video_id}_scenes.json")
+        npy_path  = os.path.join(self.dirs["scenes"], f"{video_id}_embeddings.npy")
+        if os.path.exists(json_path) and os.path.exists(npy_path):
+            # Extra validation: make sure the JSON contains at least 1 scene
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if data.get("total_scenes", 0) > 0:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def cleanup_media(self, video_id, video_path=None):
+        """
+        Safely deletes heavy temporary media files ONLY after confirming that
+        scene analysis outputs (_scenes.json and _embeddings.npy) are valid on disk.
+        Keeps: metadata JSON, transcript JSON, scenes JSON, embeddings NPY.
+        Removes: raw video MP4, extracted frames folder, scene keyframe image folder.
+        """
+        json_path = os.path.join(self.dirs["scenes"], f"{video_id}_scenes.json")
+        npy_path  = os.path.join(self.dirs["scenes"], f"{video_id}_embeddings.npy")
+
+        # Safety gate: only delete if both output files confirmed to exist and are valid
+        if not os.path.exists(json_path) or not os.path.exists(npy_path):
+            print("⚠️  Cleanup skipped: scene output files not found. Data may not have been saved correctly.")
+            return
+
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if data.get("total_scenes", 0) == 0:
+                print("⚠️  Cleanup skipped: scenes JSON has 0 scenes, processing may have failed.")
+                return
+        except Exception as e:
+            print(f"⚠️  Cleanup skipped: could not validate scenes JSON ({e}).")
+            return
+
+        print("\n🧹 Scene data confirmed saved. Cleaning up heavy media files...")
+
+        # 1. Delete raw video MP4
+        mp4_path = video_path or os.path.join(self.dirs["videos"], f"{video_id}.mp4")
+        if os.path.exists(mp4_path):
+            os.remove(mp4_path)
+            print(f"   🗑️  Deleted video:          {mp4_path}")
+        else:
+            print(f"   ℹ️  Video not found (already removed): {mp4_path}")
+
+        # 2. Delete extracted frames folder
+        frames_dir = os.path.join(self.dirs["frames"], video_id)
+        if os.path.exists(frames_dir):
+            shutil.rmtree(frames_dir)
+            print(f"   🗑️  Deleted frames folder:  {frames_dir}/")
+
+        # 3. Delete scene keyframe images folder
+        keyframes_dir = os.path.join(self.dirs["scenes"], video_id)
+        if os.path.exists(keyframes_dir):
+            shutil.rmtree(keyframes_dir)
+            print(f"   🗑️  Deleted keyframes folder: {keyframes_dir}/")
+
+        print("✅ Cleanup complete! Lightweight data retained:")
+        print(f"   💾 {json_path}")
+        print(f"   💾 {npy_path}")
+        print(f"   💾 {os.path.join(self.dirs['metadata'], video_id + '.json')}")
+        print(f"   💾 {os.path.join(self.dirs['transcripts'], video_id + '.json')}")
 
     def download_video_and_metadata(self, url, video_id):
         """Downloads the video file and saves metadata as JSON."""
@@ -179,11 +252,26 @@ class YouTubeFeatureExtractor:
         cap.release()
         print(f"✅ Extracted {saved_count} frames to {frame_dir}/")
 
-    def process_url(self, url, run_scene_analysis=True):
-        """Main pipeline function."""
+    def process_url(self, url, run_scene_analysis=True, auto_cleanup=True, run_ad_recommendations=True):
+        """
+        Main pipeline function.
+        - auto_cleanup: If True, deletes video, frames, and keyframe images AFTER
+          scene analysis is confirmed complete and data is saved.
+        - run_ad_recommendations: If True, runs hybrid ad recommendation right after
+          processing completes.
+        """
         video_id = self.extract_video_id(url)
         if not video_id:
             print("❌ Invalid YouTube URL or Video ID")
+            return
+
+        # ── SMART CACHE: Skip full pipeline if already processed ──────────────
+        if self.is_already_processed(video_id):
+            print(f"\n✅ Video '{video_id}' has already been processed.")
+            print(f"   Scene data and embeddings found in data/scenes/.")
+            print(f"   Skipping download & re-processing.\n")
+            if run_ad_recommendations:
+                self._run_recommendations(video_id)
             return
 
         print(f"Starting extraction for Video ID: {video_id}\n" + "-"*40)
@@ -204,13 +292,39 @@ class YouTubeFeatureExtractor:
         print("-" * 40 + "\n🎉 Base Extraction Complete!")
 
         # 4. Multi-Modal Scene Analysis Pipeline (Steps 1 to 5)
+        scene_analysis_ok = False
         if run_scene_analysis:
             try:
                 from scene_analyzer import SceneAnalyzer
                 analyzer = SceneAnalyzer(output_dir=self.output_dir)
                 analyzer.analyze_video(video_path, video_id)
+                scene_analysis_ok = True
             except Exception as e:
                 print(f"⚠️ Scene analysis failed or skipped: {e}")
+
+        # 5. Auto Cleanup: Delete video, frames & keyframes ONLY after confirmed save
+        if auto_cleanup and scene_analysis_ok:
+            self.cleanup_media(video_id, video_path=video_path)
+        elif auto_cleanup and not scene_analysis_ok:
+            print("\n⚠️  Cleanup skipped because scene analysis did not complete successfully.")
+            print(f"   The video file is preserved at: {video_path}")
+
+        # 6. Run Ad Recommendations using lightweight saved data
+        if run_ad_recommendations and scene_analysis_ok:
+            self._run_recommendations(video_id)
+
+    def _run_recommendations(self, video_id):
+        """Runs the Hybrid Ad Recommender on the processed video."""
+        print("\n" + "="*60)
+        print("🎯 Running Hybrid Ad Recommendation Engine...")
+        print("="*60)
+        try:
+            from recommend_ads_advanced import AdvancedAdRecommender
+            recommender = AdvancedAdRecommender(data_dir=self.output_dir)
+            recommender.recommend_for_video(video_id)
+        except Exception as e:
+            print(f"⚠️ Ad recommendation failed: {e}")
+            print(f"   You can run it manually: python recommend_ads_advanced.py {video_id}")
 
 
 # --- Run the Script ---
