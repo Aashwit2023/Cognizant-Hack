@@ -8,3 +8,5 @@ sentence-transformers
 Pillow
 pandas
 numpy
+pinecone
+python-dotenv

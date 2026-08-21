@@ -446,6 +446,18 @@ class SceneAnalyzer:
         # Step 5: Profile Fusion & Sentence Embeddings
         result, t_step5 = self.build_scene_profiles_and_embeddings(scenes, video_id, metadata)
         
+        # Step 6 (Cloud): Automatic Sync to Pinecone Vector DB (if configured)
+        try:
+            from pinecone_db import PineconeManager
+            pinecone_mgr = PineconeManager()
+            if pinecone_mgr.is_available():
+                npy_path = os.path.join(self.scenes_dir, f"{video_id}_embeddings.npy")
+                if os.path.exists(npy_path):
+                    embeddings = np.load(npy_path)
+                    pinecone_mgr.upsert_video_scenes(video_id, result, embeddings)
+        except Exception as e:
+            print(f"⚠️ Pinecone auto-sync notice: {e}")
+        
         total_time = max(time.time() - total_start, 0.001)
 
         # Print Timing Breakdown
